@@ -2,7 +2,7 @@
 ================================================================================
 AMECATH ENTERPRISE DASHBOARD - STREAMLIT APPLICATION
 ================================================================================
-Version: 2.0.0 Enterprise Edition
+Version: 2.1.0 Enterprise Edition (FIXED DATA LOADING)
 Author: Principal Full-Stack Python Architect
 Purpose: C-Suite Executive Dashboard for Dialysis Catheter Market Intelligence
 Target Users: CEO, CFO, VP of Global Sales, Market Access Directors
@@ -27,6 +27,9 @@ from typing import Dict, List, Tuple, Optional, Any
 import json
 import hashlib
 from functools import lru_cache
+import warnings
+
+warnings.filterwarnings('ignore')
 
 # Page configuration
 st.set_page_config(
@@ -525,7 +528,7 @@ def inject_country_theme(country: str):
 
 
 # ==============================================================================
-# DATA LOADING & CACHING
+# DATA LOADING & CACHING (FIXED VERSION)
 # ==============================================================================
 
 @st.cache_data
@@ -548,63 +551,88 @@ def load_excel_data(file_path: str = "Amecath Dash.xlsx") -> Dict[str, pd.DataFr
         return {}
     except Exception as e:
         st.error(f"❌ Error loading Excel file: {str(e)}")
+        st.info("💡 Using demonstration data instead. You can upload your file again.")
         return {}
 
 
 def clean_dataframe(df: pd.DataFrame, sheet_name: str) -> pd.DataFrame:
-    """Clean and standardize dataframe based on sheet type."""
-    # Convert currency columns (e.g., "$9.3M" -> 9.3)
-    for col in df.columns:
-        if df[col].dtype == object:
-            # Handle currency values like "$9.3M", "$1,234.56"
-            df[col] = df[col].apply(lambda x: parse_currency(x) if isinstance(x, str) else x)
-            # Handle percentage values
-            df[col] = df[col].apply(lambda x: parse_percentage(x) if isinstance(x, str) and '%' in str(x) else x)
+    """Clean and standardize dataframe based on sheet type with robust error handling."""
+
+    # Drop completely empty rows/columns first
+    df = df.dropna(how='all', axis=0)
+    df = df.dropna(how='all', axis=1)
 
     # Standardize column names
     df.columns = [str(col).strip().lower().replace(' ', '_') for col in df.columns]
 
-    # Drop completely empty rows/columns
-    df = df.dropna(how='all', axis=0)
-    df = df.dropna(how='all', axis=1)
+    # Process each column based on its content
+    for col in df.columns:
+        if df[col].dtype == object:
+            # Try to convert to numeric where appropriate
+            df[col] = df[col].apply(lambda x: safe_convert_to_numeric(x))
 
     # Fill remaining NaN values appropriately
     numeric_cols = df.select_dtypes(include=[np.number]).columns
     df[numeric_cols] = df[numeric_cols].fillna(0)
 
+    # Fill string columns with empty string
+    string_cols = df.select_dtypes(include=['object']).columns
+    df[string_cols] = df[string_cols].fillna('')
+
     return df
 
 
-def parse_currency(value: str) -> float:
-    """Parse currency strings like '$9.3M' to float."""
-    if not isinstance(value, str):
-        return value if pd.notna(value) else 0.0
-
-    value = value.strip().replace(',', '').replace('$', '')
-
-    if 'M' in value.upper():
-        return float(value.upper().replace('M', '')) * 1_000_000
-    elif 'K' in value.upper():
-        return float(value.upper().replace('K', '')) * 1_000
-    elif 'B' in value.upper():
-        return float(value.upper().replace('B', '')) * 1_000_000_000
-    else:
-        try:
-            return float(value)
-        except ValueError:
-            return 0.0
-
-
-def parse_percentage(value: str) -> float:
-    """Parse percentage strings like '45.5%' to float."""
-    if not isinstance(value, str):
-        return value if pd.notna(value) else 0.0
-
-    value = value.strip().replace('%', '')
-    try:
-        return float(value) / 100
-    except ValueError:
+def safe_convert_to_numeric(value) -> Any:
+    """Safely convert a value to numeric, handling various formats."""
+    if value is None or (isinstance(value, float) and np.isnan(value)):
         return 0.0
+
+    if isinstance(value, (int, float)):
+        return float(value)
+
+    if not isinstance(value, str):
+        return value
+
+    value = value.strip()
+
+    # Handle empty strings
+    if not value:
+        return 0.0
+
+    # Handle currency values like "$9.3M", "$1,234.56"
+    if '$' in value or '€' in value or ' £' in value:
+        value = value.replace('$', '').replace('€', '').replace(' £', '').replace(',', '').strip()
+
+    # Handle M, K, B suffixes
+    if value.upper().endswith('M'):
+        try:
+            return float(value[:-1]) * 1_000_000
+        except ValueError:
+            return value
+    elif value.upper().endswith('K'):
+        try:
+            return float(value[:-1]) * 1_000
+        except ValueError:
+            return value
+    elif value.upper().endswith('B'):
+        try:
+            return float(value[:-1]) * 1_000_000_000
+        except ValueError:
+            return value
+
+    # Handle percentage values
+    if '%' in value:
+        try:
+            return float(value.replace('%', '').replace(',', '')) / 100
+        except ValueError:
+            return value
+
+    # Try to convert to float
+    try:
+        return float(value.replace(',', ''))
+    except ValueError:
+        # Return original string if it can't be converted
+        return value
 
 
 @st.cache_data
@@ -1204,13 +1232,29 @@ def main():
         st.markdown("For technical support, contact your system administrator.")
 
     # Load data
+    data = {}
+    use_synthetic = False
+
     if uploaded_file is not None:
-        # Save uploaded file temporarily
-        with open("temp_upload.xlsx", "wb") as f:
-            f.write(uploaded_file.getvalue())
-        data = load_excel_data("temp_upload.xlsx")
+        try:
+            # Save uploaded file temporarily
+            with open("temp_upload.xlsx", "wb") as f:
+                f.write(uploaded_file.getvalue())
+            data = load_excel_data("temp_upload.xlsx")
+
+            # Check if data loaded successfully
+            if not data or all(df.empty for df in data.values()):
+                st.warning("⚠️ Uploaded file appears to be empty or has incompatible format.")
+                use_synthetic = True
+        except Exception as e:
+            st.error(f"❌ Error processing uploaded file: {str(e)}")
+            st.info("💡 Using demonstration data instead.")
+            use_synthetic = True
     else:
-        # Use synthetic data for demonstration
+        use_synthetic = True
+
+    # Use synthetic data if needed
+    if use_synthetic or not data:
         st.info("📋 Using demonstration data. Upload your Excel file for production data.")
         data = generate_synthetic_data()
 
@@ -2010,7 +2054,7 @@ def main():
                 tender_country = st.multiselect(
                     "Filter by Country",
                     options=tenders_df['country'].unique(),
-                    default=tenders_df['country'].unique()[:5],
+                    default=list(tenders_df['country'].unique())[:5],
                     key="tender_country_filter"
                 )
 
@@ -2026,7 +2070,7 @@ def main():
                 tender_type = st.multiselect(
                     "Filter by Product Type",
                     options=tenders_df['product_type'].unique(),
-                    default=tenders_df['product_type'].unique(),
+                    default=list(tenders_df['product_type'].unique()),
                     key="tender_type_filter"
                 )
 
